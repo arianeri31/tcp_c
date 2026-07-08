@@ -1,0 +1,9 @@
+/.venv
+setup_cpu.sh
+teardown_cpu.sh
+client_copy
+client_copy_loop
+client_zc
+client_zc_loop_pipeline
+server_zc
+client_zc_loop
