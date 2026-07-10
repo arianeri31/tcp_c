@@ -344,68 +344,63 @@ static int send_available_zc(int sock,
 
         struct zc_buffer *buf = &pool[*current_buf_index];
 
-        while (*current_offset < conf->buffer_size) {
-            size_t left_to_send = conf->buffer_size - *current_offset;
+        //while (*current_offset < conf->buffer_size) {
+        size_t left_to_send = conf->buffer_size - *current_offset;
 
-            if (left_to_send > CHUNK_SIZE) {
-                left_to_send = CHUNK_SIZE;
-            }
-
-            ssize_t sent = send(sock,
-                                buf->data + *current_offset,
-                                left_to_send,
-                                MSG_ZEROCOPY);
-            // to see what is sent each send 
-            printf("return of the send: %zd, errno=%s\n", sent, strerror(errno));
-
-            if (sent < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    return 1;
-                }
-
-                if (errno == ENOBUFS) {
-
-                    *total_notif += read_zc_notif(sock,
-                                                  pool,
-                                                  pool_size,
-                                                  fallback_count);
-
-                    usleep(1000);
-                    return 1;
-                }
-
-                perror("send MSG_ZEROCOPY");
-                return -1;
-            }
-
-            if (sent == 0) {
-                fprintf(stderr, "send returned 0, stopping to avoid infinite loop\n");
-                return -1;
-            }
-
-            if (buf->send_nb >= MAX_SEND_IDS_PER_BUFFER) {
-                fprintf(stderr,
-                        "Too many partial sends for one buffer. "
-                        "Increase MAX_SEND_IDS_PER_BUFFER.\n");
-                return -1;
-            }
-
-            buf->send_ids[buf->send_nb] = *next_zc_id;
-            buf->send_nb++;
-
-            (*next_zc_id)++;
-
-            *current_offset += (size_t)sent;
-            *total_sent += (size_t)sent;
+        if (left_to_send > CHUNK_SIZE) {
+            left_to_send = CHUNK_SIZE;
         }
 
-        /*
-         * Le buffer logique est entièrement accepté par send().
-         * Mais le buffer reste in_use jusqu'aux notifications zerocopy.
-         */
-        (*next_msg)++;
-        *current_buf_index = -1;
-        *current_offset = 0;
+        ssize_t sent = send(sock,
+                            buf->data + *current_offset,
+                            left_to_send,
+                            MSG_ZEROCOPY);
+        // to see what is sent each send 
+        printf("return of the send: %zd, errno=%s\n", sent, strerror(errno));
+
+        if (sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 1;
+            }
+
+            if (errno == ENOBUFS) {
+
+                *total_notif += read_zc_notif(sock,pool,pool_size,fallback_count);
+
+                usleep(1000);
+                return 1;
+            }
+
+            perror("send MSG_ZEROCOPY");
+            return -1;
+            }
+
+        if (sent == 0) {
+            fprintf(stderr, "send returned 0, stopping to avoid infinite loop\n");
+            return -1;
+        }
+
+        if (buf->send_nb >= MAX_SEND_IDS_PER_BUFFER) {
+            fprintf(stderr,
+                    "Too many partial sends for one buffer. "
+                    "Increase MAX_SEND_IDS_PER_BUFFER.\n");
+            return -1;
+        }
+
+        buf->send_ids[buf->send_nb] = *next_zc_id;
+        buf->send_nb++;
+
+        (*next_zc_id)++;
+
+        *current_offset += (size_t)sent;
+        *total_sent += (size_t)sent;
+        //}
+
+        if (*current_offset >= conf->buffer_size) {
+            (*next_msg)++;
+            *current_buf_index = -1;
+            *current_offset = 0;
+        }
     }
 
     return 1;
@@ -555,6 +550,9 @@ int main(int argc, char **argv)
         struct pollfd pfd;
         int busy_buffers;
 
+        //printf("CLIENT next_msg=%d, current_buf_index=%d, total_received=%zu, expected_received=%zu, busy_buffers=%d\n",
+        //      next_msg, current_buf_index, total_received, expected_received, count_busy_buffers(pool, conf.pool_size));
+
         total_notif += read_zc_notif(sock,
                                     pool,
                                     conf.pool_size,
@@ -572,11 +570,13 @@ int main(int argc, char **argv)
 
         if (total_received < expected_received) 
         {
+            //printf("add POLLIN)\n");
             pfd.events |= POLLIN;
         }
 
         if (current_buf_index >= 0 || (next_msg < conf.nb_sends && busy_buffers < conf.pool_size)) 
         {
+            //printf("add POLLOUT\n");
             pfd.events |= POLLOUT;
         }
 
@@ -590,6 +590,7 @@ int main(int argc, char **argv)
         }
 
         if (pfd.revents & POLLERR) {
+            //printf("In POLLERR\n");
             total_notif += read_zc_notif(sock,
                                         pool,
                                         conf.pool_size,
@@ -597,6 +598,7 @@ int main(int argc, char **argv)
         }
 
         if (pfd.revents & POLLIN) {
+            //printf("In POLLIN\n");
             if (recv_available(sock,
                             recv_buffer,
                             conf.buffer_size,
@@ -607,6 +609,7 @@ int main(int argc, char **argv)
         }
 
         if (pfd.revents & POLLOUT) {
+            //printf("In POLLOUT\n");
             if (send_available_zc(sock,
                                 pool,
                                 conf.pool_size,
@@ -624,8 +627,9 @@ int main(int argc, char **argv)
 
         if ((pfd.revents & POLLHUP) &&
             total_received < expected_received) {
-            fprintf(stderr, "Connection closed before all expected data was received\n");
-            exit(EXIT_FAILURE);
+                //printf("In POLLHUP\n");
+                fprintf(stderr, "Connection closed before all expected data was received\n");
+                exit(EXIT_FAILURE);
         }
     }
 
