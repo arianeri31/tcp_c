@@ -10,7 +10,7 @@ POOL_SIZE=16
 OUT_SIZE="results_sizes_zc_comp.csv"
 OUT_SENDS="results_sends_zc_comp.csv"
 
-HEADER="program,buffer_size,nb_sends,pool_size,total_sent,total_received,total_elapsed_time_us,avg_elapsed_time_us,total_notif,fallback_count"
+HEADER="program,buffer_size,nb_sends,pool_size,total_sent,total_received,total_elapsed_time_us,total_msg_time_us,avg_msg_time_us,total_notif,fallback_count"
 
 echo "$HEADER" > "$OUT_SIZE"
 echo "$HEADER" > "$OUT_SENDS"

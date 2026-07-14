@@ -568,7 +568,8 @@ int main(int argc, char **argv)
             max_elapsed_time_us = elapsed_times[i];
         }
     }
-
+    // total time for all messages is the same as total elapsed time for all sends and receives as it is a pingpong version 
+    long long total_msg_time_us = total_elapsed_time_us; 
     // tell the server that the client has finished sending data
     shutdown(sock, SHUT_WR);
 
@@ -610,13 +611,14 @@ int main(int argc, char **argv)
            total_notif,
            fallback_count);
 
-      printf("RESULT_COMP,zc_loop,%zu,%d,%d,%zu,%zu,%lld,%lld,%d,%d\n",
+      printf("RESULT_COMP,zc_loop,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            conf.pool_size,
            total_sent,
            total_received,
            total_elapsed_time_us,
+           total_msg_time_us,
            average_elapsed_time_us,
            total_notif,
            fallback_count);

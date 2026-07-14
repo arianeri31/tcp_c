@@ -7,3 +7,5 @@ client_zc
 client_zc_loop_pipeline
 server_zc
 client_zc_loop
+client_copy_loop_pipeline
+results_sizes_zc_comp_issue???.csv

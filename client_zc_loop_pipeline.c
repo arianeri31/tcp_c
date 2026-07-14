@@ -58,6 +58,14 @@ struct config {
     int pool_size;
 };
 
+// for measuring the elapsed time of each msg 
+struct msg_time {
+    struct timespec t_start;
+    long long elapsed_us;
+    bool started; // to know if the send has started or not so we don't start a mesurement for every send if the sends are partials 
+    bool finished; // to indicate if the receiving is done
+};
+
 
 static void parse_args(int argc, char **argv, struct config *conf)
 {
@@ -99,7 +107,8 @@ static long long elapsed_us(struct timespec start, struct timespec end)
          + (end.tv_nsec - start.tv_nsec) / 1000;
 }
 
-// set the socket to non-blocking mode
+// set the socket to non-blocking mode so i don't have to use the MSG_DONTWAIT flag on every send and recv 
+// tarpin pratique 
 static int set_nonblocking(int fd)
 {
     int flags;
@@ -274,7 +283,10 @@ static int recv_available(int sock,
                           char *recv_buffer,
                           size_t buffer_size,
                           size_t *total_received,
-                          size_t expected_received)
+                          size_t expected_received,
+                          int *next_recv_msg,
+                          int nb_sends,
+                          struct msg_time *msg_times)
 {
     while (*total_received < expected_received) {
         size_t to_recv = buffer_size;
@@ -289,10 +301,25 @@ static int recv_available(int sock,
                                 recv_buffer,
                                 to_recv,0);
 
-        if (received > 0) {
-            *total_received += (size_t)received;
-            continue;
+    if (received > 0) {
+        *total_received += (size_t)received;
+
+        while (*next_recv_msg < (size_t)nb_sends &&
+            *total_received >= (*next_recv_msg + 1) * buffer_size) {
+
+            struct timespec t_end;
+            clock_gettime(CLOCK_MONOTONIC, &t_end);
+
+            if (msg_times[*next_recv_msg].started && !msg_times[*next_recv_msg].finished) {
+
+                msg_times[*next_recv_msg].elapsed_us = elapsed_us(msg_times[*next_recv_msg].t_start, t_end);
+                msg_times[*next_recv_msg].finished = true;
+            }
+            (*next_recv_msg)++;
         }
+
+        continue;
+    }
 
         if (received == 0) {
             fprintf(stderr, "Connection closed before receiving all data\n");
@@ -315,14 +342,15 @@ static int send_available_zc(int sock,
                              int pool_size,
                              int *current_buf_index,
                              size_t *current_offset,
-                             int *next_msg,
+                             int *next_send_msg,
                              struct config *conf,
                              uint32_t *next_zc_id,
                              size_t *total_sent,
                              int *total_notif,
-                             int *fallback_count)
+                             int *fallback_count,
+                             struct msg_time *msg_times)
 {
-    while (*current_buf_index >= 0 || *next_msg < conf->nb_sends) {
+    while (*current_buf_index >= 0 || *next_send_msg < conf->nb_sends) {
 
         if (*current_buf_index < 0) {
             int buf_index = find_free_buffer(pool, pool_size);
@@ -338,7 +366,7 @@ static int send_available_zc(int sock,
 
             // Fill the chosen free buffer with fake data.
             memset(pool[buf_index].data,
-                   '0' + (*next_msg % 10),
+                   '0' + (*next_send_msg % 10),
                    pool[buf_index].size);
         }
 
@@ -351,12 +379,17 @@ static int send_available_zc(int sock,
             left_to_send = CHUNK_SIZE;
         }
 
+        if(msg_times[*next_send_msg].started == false) {
+            clock_gettime(CLOCK_MONOTONIC, &msg_times[*next_send_msg].t_start);
+            msg_times[*next_send_msg].started = true;
+        }
+
         ssize_t sent = send(sock,
                             buf->data + *current_offset,
                             left_to_send,
                             MSG_ZEROCOPY);
         // to see what is sent each send 
-        printf("return of the send: %zd, errno=%s\n", sent, strerror(errno));
+        //printf("return of the send: %zd, errno=%s\n", sent, strerror(errno));
 
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -397,8 +430,8 @@ static int send_available_zc(int sock,
         //}
 
         if (*current_offset >= conf->buffer_size) {
-            (*next_msg)++;
-            *current_buf_index = -1;
+            (*next_send_msg)++;
+            *current_buf_index = -1; // when the message is sent, no buffer is used to send so it goes back to -1
             *current_offset = 0;
         }
     }
@@ -413,9 +446,13 @@ int main(int argc, char **argv)
 {
     int sock;
     struct sockaddr_in serv_addr;
-    struct timespec t_start, t_end;
-
+    struct timespec t_start_tot, t_end_tot;
+    
     long long total_elapsed_time_us = 0;
+    long long average_msg_time_us = 0;
+    long long min_elapsed_time_us = 0;
+    long long max_elapsed_time_us = 0;
+    long long total_msg_time_us = 0;
 
     size_t total_sent = 0;
     size_t total_received = 0;
@@ -436,17 +473,28 @@ int main(int argc, char **argv)
     // the expected total number of bytes to be received back from the server
     size_t expected_received =(size_t)conf.buffer_size *(size_t)conf.nb_sends;
     
-    // next_msg is the index of the next message 
+    // next_msg is the index of the message that is being sent 
     // as it is a pipeline version, there's no loop for sending then receiving
-    // so we need to keep track of the next message to send
-    int next_msg = 0;
+    // so we need to keep track of what is being sent 
+    int next_send_msg = 0;
 
-    // current_buf_index is the index of the buffer in the pool that is currently being sent
+    int next_recv_msg = 0; // to track the message that is being received to calculate the elapsed time for each message
+
+    // current_buf_index is the index of the buffer in the pool that is currently used to send data
+    // same as buf_index in the pingpong version but as it as non blocking version, the index can not be declared in the loop 
+    // as we would lose its value 
     int current_buf_index = -1;
 
     // current_offset is the offset in the buffer that is currently being sent
     // important because we need to know when the buffer is completely sent 
     size_t current_offset = 0;
+
+    struct msg_time *msg_times = calloc((size_t)conf.nb_sends, sizeof(*msg_times));
+
+    if (msg_times == NULL) {
+        perror("calloc msg_times");
+        exit(EXIT_FAILURE);
+    }
 
     struct zc_buffer *pool = calloc((size_t)conf.pool_size, sizeof(*pool));
 
@@ -542,16 +590,16 @@ int main(int argc, char **argv)
 
 
 
-    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    clock_gettime(CLOCK_MONOTONIC, &t_start_tot);
 
-    while (next_msg < conf.nb_sends || current_buf_index >= 0 || total_received < expected_received || 
+    while (next_send_msg < conf.nb_sends || current_buf_index >= 0 || total_received < expected_received || 
             count_busy_buffers(pool, conf.pool_size) > 0) 
     {
         struct pollfd pfd;
         int busy_buffers;
 
-        //printf("CLIENT next_msg=%d, current_buf_index=%d, total_received=%zu, expected_received=%zu, busy_buffers=%d\n",
-        //      next_msg, current_buf_index, total_received, expected_received, count_busy_buffers(pool, conf.pool_size));
+        //printf("CLIENT next_send_msg=%d, current_buf_index=%d, total_received=%zu, expected_received=%zu, busy_buffers=%d\n",
+        //      next_send_msg, current_buf_index, total_received, expected_received, count_busy_buffers(pool, conf.pool_size));
 
         total_notif += read_zc_notif(sock,
                                     pool,
@@ -574,7 +622,7 @@ int main(int argc, char **argv)
             pfd.events |= POLLIN;
         }
 
-        if (current_buf_index >= 0 || (next_msg < conf.nb_sends && busy_buffers < conf.pool_size)) 
+        if (current_buf_index >= 0 || (next_send_msg < conf.nb_sends && busy_buffers < conf.pool_size)) 
         {
             //printf("add POLLOUT\n");
             pfd.events |= POLLOUT;
@@ -603,7 +651,10 @@ int main(int argc, char **argv)
                             recv_buffer,
                             conf.buffer_size,
                             &total_received,
-                            expected_received) < 0) {
+                            expected_received,
+                            &next_recv_msg,
+                            conf.nb_sends,
+                            msg_times) < 0) {
                 exit(EXIT_FAILURE);
             }
         }
@@ -615,12 +666,13 @@ int main(int argc, char **argv)
                                 conf.pool_size,
                                 &current_buf_index,
                                 &current_offset,
-                                &next_msg,
+                                &next_send_msg,
                                 &conf,
                                 &next_zc_id,
                                 &total_sent,
                                 &total_notif,
-                                &fallback_count) < 0) {
+                                &fallback_count,
+                                msg_times) < 0) {
                 exit(EXIT_FAILURE);
             }
         }
@@ -633,14 +685,29 @@ int main(int argc, char **argv)
         }
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    clock_gettime(CLOCK_MONOTONIC, &t_end_tot);
 
 
 
-    // calculate the average elapsed time for all sends
-    total_elapsed_time_us = elapsed_us(t_start, t_end);
+    // calculate some stats about the elapsed time for each send and receive
+    for (int i = 0; i < conf.nb_sends; i++) {
+        if (msg_times[i].started && msg_times[i].finished) {
+            total_msg_time_us += msg_times[i].elapsed_us;
 
-    long long average_elapsed_time_us = total_elapsed_time_us / conf.nb_sends;
+            if (i == 0 || msg_times[i].elapsed_us < min_elapsed_time_us) {
+                min_elapsed_time_us = msg_times[i].elapsed_us;
+            }
+
+            if (i == 0 || msg_times[i].elapsed_us > max_elapsed_time_us) {
+                max_elapsed_time_us = msg_times[i].elapsed_us;
+            }
+        } 
+        else {
+            fprintf(stderr, "Message %d did not complete properly\n", i);
+        }
+    }
+    total_elapsed_time_us = elapsed_us(t_start_tot, t_end_tot);
+    average_msg_time_us = total_msg_time_us / conf.nb_sends;
 
     // tell the server that the client has finished sending data
     shutdown(sock, SHUT_WR);
@@ -664,25 +731,43 @@ int main(int argc, char **argv)
     printf("Client sent: %zu bytes with MSG_ZEROCOPY\n", total_sent);
     printf("Client received: %zu bytes\n", total_received);
     printf("Elapsed loop time: %lld us\n", total_elapsed_time_us);
+    printf("Total time for all msgs: %lld us\n", total_msg_time_us);
     printf("Client zerocopy notifications received: %d\n", total_notif);
     printf("Client fallback copy notifications: %d\n", fallback_count);
-    printf("Average elapsed time per send: %lld us\n", average_elapsed_time_us);
+    printf("Average elapsed time per send: %lld us\n", average_msg_time_us);
+    printf("Minimum elapsed time per send: %lld us\n", min_elapsed_time_us);
+    printf("Maximum elapsed time per send: %lld us\n", max_elapsed_time_us);
 
 
-    printf("RESULT_COMP,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%d,%d\n",
+    printf("RESULT,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            conf.pool_size,
            total_sent,
            total_received,
            total_elapsed_time_us,
-           average_elapsed_time_us,
+           average_msg_time_us,
+           min_elapsed_time_us,
+           max_elapsed_time_us,
+           total_notif,
+           fallback_count);
+
+    printf("RESULT_COMP,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
+           conf.buffer_size,
+           conf.nb_sends,
+           conf.pool_size,
+           total_sent,
+           total_received,
+           total_elapsed_time_us,
+           total_msg_time_us,
+           average_msg_time_us,
            total_notif,
            fallback_count);
 
     close(sock);
     free_pool(pool, conf.pool_size);
     free(recv_buffer);
+    free(msg_times);
 
     return 0;
 }
