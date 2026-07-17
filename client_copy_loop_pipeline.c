@@ -212,11 +212,14 @@ int main(int argc, char **argv)
     int sock;
     struct sockaddr_in serv_addr;
 
+    struct timespec t_start_tot, t_end_tot;
+
     size_t total_sent = 0;
     size_t total_received = 0;
 
     long long total_elapsed_time_us = 0;
-    long long average_elapsed_time_us = 0;
+    long long total_msg_time_us = 0;
+    long long average_msg_time_us = 0;
     long long min_elapsed_time_us = 0;
     long long max_elapsed_time_us = 0;
 
@@ -310,6 +313,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &t_start_tot);
     while (next_send_msg < conf.nb_sends ||
            total_received < expected_received) {
 
@@ -374,11 +378,11 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
     }
-
+    clock_gettime(CLOCK_MONOTONIC, &t_end_tot);
     // calculate some stats about the elapsed time for each send and receive
     for (int i = 0; i < conf.nb_sends; i++) {
         if (msg_times[i].started && msg_times[i].finished) {
-            total_elapsed_time_us += msg_times[i].elapsed_us;
+            total_msg_time_us += msg_times[i].elapsed_us;
 
             if (i == 0 || msg_times[i].elapsed_us < min_elapsed_time_us) {
                 min_elapsed_time_us = msg_times[i].elapsed_us;
@@ -392,7 +396,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "Message %d did not complete properly\n", i);
         }
     }
-    average_elapsed_time_us = total_elapsed_time_us / conf.nb_sends;
+    average_msg_time_us = total_msg_time_us / conf.nb_sends;
+    total_elapsed_time_us = elapsed_us(t_start_tot,t_end_tot);
 
 
     // tell the server that the client has finished sending data
@@ -403,30 +408,33 @@ int main(int argc, char **argv)
     printf("Client sent: %zu bytes\n", total_sent);
     printf("Client received: %zu bytes\n", total_received);
     printf("Elapsed loop time: %lld us\n", total_elapsed_time_us);
-    printf("Average elapsed time per send: %lld us\n", average_elapsed_time_us);
+    printf("Total time for all msgs: %lld us\n", total_msg_time_us);
+    printf("Average time per msg: %lld us\n", average_msg_time_us);
     printf("Min elapsed time per send: %lld us\n", min_elapsed_time_us);
     printf("Max elapsed time per send: %lld us\n", max_elapsed_time_us);
 
-    printf("RESULT,copy_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%d,%d\n",
+    printf("RESULT,copy_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            0,
            total_sent,
            total_received,
            total_elapsed_time_us,
-           average_elapsed_time_us,
+           total_msg_time_us,
+           average_msg_time_us,
            min_elapsed_time_us,
            max_elapsed_time_us,
            0,
            0);
 
-    printf("RESULT_COMP_COPY,copy_loop_pipeline,%zu,%d,%zu,%zu,%lld,%lld\n",
+    printf("RESULT_COMP_COPY,copy_loop_pipeline,%zu,%d,%zu,%zu,%lld,%lld,%lld\n",
            conf.buffer_size,
            conf.nb_sends,
            total_sent,
            total_received,
            total_elapsed_time_us,
-           average_elapsed_time_us);
+           total_msg_time_us,
+           average_msg_time_us);
 
     close(sock);
     free(send_buffer);

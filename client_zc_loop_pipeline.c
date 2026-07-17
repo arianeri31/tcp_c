@@ -389,7 +389,7 @@ static int send_available_zc(int sock,
                             left_to_send,
                             MSG_ZEROCOPY);
         // to see what is sent each send 
-        //printf("return of the send: %zd, errno=%s\n", sent, strerror(errno));
+        //printf("return of the send: %zd, errno=%s, %d\n", sent, strerror(errno),errno);
 
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -712,16 +712,6 @@ int main(int argc, char **argv)
     // tell the server that the client has finished sending data
     shutdown(sock, SHUT_WR);
 
-    // Wait until all zerocopy sends have been confirmed.
-    // Then, all pool buffers can be safely freed.
-    while (count_busy_buffers(pool, conf.pool_size) > 0) {
-        total_notif += read_zc_notif(sock,
-                                     pool,
-                                     conf.pool_size,
-                                     &fallback_count);
-        usleep(10);
-    }
-
     
 
     printf("buffer_size: %zu\n", conf.buffer_size);
@@ -739,20 +729,21 @@ int main(int argc, char **argv)
     printf("Maximum elapsed time per send: %lld us\n", max_elapsed_time_us);
 
 
-    printf("RESULT,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%d,%d\n",
+    printf("RESULT,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            conf.pool_size,
            total_sent,
            total_received,
            total_elapsed_time_us,
+           total_msg_time_us,
            average_msg_time_us,
            min_elapsed_time_us,
            max_elapsed_time_us,
            total_notif,
            fallback_count);
 
-    printf("RESULT_COMP,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
+    printf("RESULT_COMP_ZC,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            conf.pool_size,

@@ -72,14 +72,14 @@ df_sends = pd.read_csv("results_sends_zc_comp.csv")
 
 
 # ------------------------------------------------------------
-# 1. Graphe selon la taille du buffer
+# 1. Graphe pour le temps total de la boucle selon la taille du buffer
 
 plt.figure()
 
 for program in df_size["program"].unique():
     sub = df_size[df_size["program"] == program].sort_values("buffer_size")
 
-    y = sub["avg_elapsed_time_us"]
+    y = sub["total_elapsed_time_us"]
 
     plt.plot(
         sub["buffer_size"],
@@ -90,8 +90,8 @@ for program in df_size["program"].unique():
 
 #plt.xscale("log")
 plt.xlabel("Buffer size (bytes)")
-plt.ylabel("Average elapsed time (us)")
-plt.title("Average elapsed time depending on buffer size for 500 loop exchanges")
+plt.ylabel("Total elapsed time (us)")
+plt.title("Total elapsed time depending on buffer size for 500 loop exchanges")
 plt.legend()
 plt.grid(True)
 
@@ -103,7 +103,7 @@ plt.show()
 
 
 # ------------------------------------------------------------
-# 2. Graphe selon le nombre de loop exchanges
+# 2. Graphe pour le temps total de la boucle selon le nombre de loop exchanges
 
 plt.figure()
 
@@ -121,7 +121,7 @@ for program in df_sends["program"].unique():
 
 #plt.xscale("log")
 plt.xlabel("Number of loop exchanges")
-plt.ylabel("Total elapsed time (s)")
+plt.ylabel("Total elapsed time (us)")
 plt.title("Total elapsed time depending on number of loop exchanges with a buffer size of 65536 bytes")
 plt.legend()
 plt.grid(True)
@@ -132,8 +132,66 @@ print(f"Graph saved in {output_file}")
 
 plt.show()
 
+
 # ------------------------------------------------------------
-# 3. Graphe selon le nombre de notifications pour le nb_sends
+# 3. Graphe pour le temps total de la somme des messages selon la taille du buffer
+
+plt.figure()
+for program in df_size["program"].unique():
+    sub = df_size[df_size["program"] == program].sort_values("buffer_size")
+
+    y = sub["total_msg_time_us"]
+
+    plt.plot(
+        sub["buffer_size"],
+        y,
+        marker="o",
+        label=program
+    )
+
+plt.xlabel("Buffer size (bytes)")
+plt.ylabel("Total message time (us)")
+plt.title("Total message time depending on buffer size for 500 loop exchanges")
+plt.legend()
+plt.grid(True)
+
+output_file = get_next_filename("zc_comp_msg_size")
+plt.savefig(output_file, dpi=300, bbox_inches="tight")
+print(f"Graph saved in {output_file}")
+
+plt.show()
+
+# ------------------------------------------------------------
+# 4. Graphe pour le temps total de la somme des messages selon le nombre de sends
+
+plt.figure()
+for program in df_sends["program"].unique():
+    sub = df_sends[df_sends["program"] == program].sort_values("nb_sends")
+
+    y = sub["total_msg_time_us"]
+
+    plt.plot(
+        sub["nb_sends"],
+        y,
+        marker="o",
+        label=program
+    )
+
+plt.xlabel("Number of sends")
+plt.ylabel("Total message time (us)")
+plt.title("Total message time depending on number of sends with a buffer size of 65536 bytes")
+plt.legend()
+plt.grid(True)
+
+output_file = get_next_filename("zc_comp_msg_sends")
+plt.savefig(output_file, dpi=300, bbox_inches="tight")
+print(f"Graph saved in {output_file}")
+
+plt.show()
+
+
+# ------------------------------------------------------------
+# 5. Graphe selon le nombre de notifications pour le nb_sends
 plt.figure()
 for program in df_sends["program"].unique():
     sub = df_sends[df_sends["program"] == program].sort_values("nb_sends")
@@ -159,7 +217,7 @@ print(f"Graph saved in {output_file}")
 plt.show()
 
 #------------------------------------------------------------
-# 4. Graphe selon le nombre de notifications pour le buffer size
+# 6. Graphe selon le nombre de notifications pour le buffer size
 plt.figure()
 for program in df_size["program"].unique():
     sub = df_size[df_size["program"] == program].sort_values("buffer_size")

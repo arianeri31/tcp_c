@@ -219,7 +219,6 @@ static void recv_all(int sock, char *buffer, size_t size)
         total_received += (size_t)received;
 
         //printf("recv_all progress: %zu / %zu\n", total_received, size);
-        fflush(stdout);
     }
 }
 
@@ -453,14 +452,12 @@ int main(void)
             }
 
 
-            // printf("SERVER before recv_all\n");
-            // fflush(stdout);            
+            // printf("SERVER before recv_all\n");        
 
             recv_all(new_socket, pool[buf_index].data, conf.buffer_size);
             total_received += conf.buffer_size;
 
             // printf("SERVER after recv_all, before send echo\n");
-            // fflush(stdout);
 
             send_all_zc_from_buffer(new_socket,
                                     &pool[buf_index],
@@ -472,7 +469,6 @@ int main(void)
 
                         
             // printf("SERVER after send echo\n");
-            // fflush(stdout);
 
             total_sent += conf.buffer_size;
 

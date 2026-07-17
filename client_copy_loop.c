@@ -106,8 +106,8 @@ int main(int argc, char **argv)
     struct sockaddr_in serv_addr;
     struct timespec t_start, t_end;
 
-    unsigned long long total_sent = 0;
-    unsigned long long total_received = 0;
+    size_t total_sent = 0;
+    size_t total_received = 0;
 
     long long total_elapsed_time_us = 0;
 
@@ -172,8 +172,8 @@ int main(int argc, char **argv)
         recv_all(sock, recv_buffer, conf.buffer_size);
         clock_gettime(CLOCK_MONOTONIC, &t_end);
 
-        total_sent += (unsigned long long)conf.buffer_size;
-        total_received += (unsigned long long)conf.buffer_size;
+        total_sent += conf.buffer_size;
+        total_received += conf.buffer_size;
 
         long long elapsed = elapsed_us(t_start, t_end);
         total_elapsed_time_us += elapsed;
@@ -202,14 +202,14 @@ int main(int argc, char **argv)
 
     printf("buffer_size: %zu\n", conf.buffer_size);
     printf("nb_sends: %d\n", conf.nb_sends);
-    printf("Client sent: %llu bytes\n", total_sent);
-    printf("Client received: %llu bytes\n", total_received);
+    printf("Client sent: %zu bytes\n", total_sent);
+    printf("Client received: %zu bytes\n", total_received);
     printf("Elapsed loop time: %lld us\n", total_elapsed_time_us);
     printf("Average elapsed time per send: %lld us\n", average_elapsed_time_us);
     printf("Min elapsed time per send: %lld us\n", min_elapsed_time_us);
     printf("Max elapsed time per send: %lld us\n", max_elapsed_time_us);
 
-    printf("RESULT,copy_loop,%zu,%d,%d,%llu,%llu,%lld,%lld,%lld,%lld,%d,%d\n",
+    printf("RESULT,copy_loop,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            0,
@@ -221,6 +221,15 @@ int main(int argc, char **argv)
            max_elapsed_time_us,
            0,
            0);
+
+    printf("RESULT_COMP_COPY,copy_loop,%zu,%d,%zu,%zu,%lld,%lld,%lld\n",
+           conf.buffer_size,
+           conf.nb_sends,
+           total_sent,
+           total_received,
+           total_elapsed_time_us,
+           total_elapsed_time_us,
+           average_elapsed_time_us);
 
     close(sock);
     free(send_buffer);
