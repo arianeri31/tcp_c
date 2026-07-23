@@ -1,68 +1,43 @@
-// Echo server using MSG_ZEROCOPY for server -> client replies
-// the server is going to be open until the user closes it manually 
-// so that we can run multiple clients sequentially without restarting the server
-// 
-#define _GNU_SOURCE
+// Classic echo server using recv() and send()
+// server receives buffer_size bytes, then sends the same data back
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <linux/errqueue.h>
-#include <poll.h>
 #include <fcntl.h>
-
-#ifndef SO_ZEROCOPY
-#define SO_ZEROCOPY 60
-#endif
-
-#ifndef MSG_ZEROCOPY
-#define MSG_ZEROCOPY 0x4000000
-#endif
+#include <poll.h>
 
 #define PORT 8080
-#define MAX_SEND_IDS_PER_BUFFER 128
-#define ZC_DRAIN_INTERVAL 16
 
-#define CHUNK_SIZE 4194304
+#define DEFAULT_POOL_SIZE 16
+
+// read is almost the same thing as recv with the flags parameter set to 0
+// same thing for write and send
 
 struct config {
     size_t buffer_size;
     int nb_sends;
-    int pool_size;
 };
 
-// the state in which the buffer can be 
 enum buffer_state {
-    FREE,
+    FREE, 
     RECEIVING,
     READY_TO_SEND,
-    SENDING,
-    WAIT_ZC
+    SENDING
 };
 
-
-struct zc_buffer {
+struct buffer {
     char *data;
     size_t size;
-
-    // the buffer is not just in use as we need to keep track of its state 
     enum buffer_state state;
 
-    // One buffer can be associated with multiple send_ids in case of partial sends.
-    uint32_t send_ids[MAX_SEND_IDS_PER_BUFFER];
-
-    // Number of successful send() calls for this buffer.
-    int send_nb;
-
-    // Number of send_ids confirmed as completed by notifications from the kernel.
-    int confirmed_nb;
 };
+
 
 // set the socket to non-blocking mode so i don't have to use the MSG_DONTWAIT flag on every send and recv 
 static int set_nonblocking(int fd)
@@ -86,7 +61,7 @@ static int set_nonblocking(int fd)
     return 0;
 }
 
-static int count_busy_buffers(struct zc_buffer *pool, int pool_size)
+static int count_busy_buffers(struct buffer *pool, int pool_size)
 {
     int count = 0;
 
@@ -99,13 +74,7 @@ static int count_busy_buffers(struct zc_buffer *pool, int pool_size)
     return count;
 }
 
-static void reset_buffer_tracking(struct zc_buffer *buf)
-{
-    buf->send_nb = 0;
-    buf->confirmed_nb = 0;
-}
-
-static void free_pool(struct zc_buffer *pool, int pool_size)
+static void free_pool(struct buffer *pool, int pool_size)
 {
     if (pool == NULL) {
         return;
@@ -118,114 +87,8 @@ static void free_pool(struct zc_buffer *pool, int pool_size)
     free(pool);
 }
 
-static void confirm_send_ids(struct zc_buffer *buf,
-                             uint32_t first_send_id,
-                             uint32_t last_send_id)
-{
-    // if we are in the sending state, there might be partial sends 
-    // and so some some will be confirmed by zc notif 
-    // so in this case, we need to read the notif and increase nb_confirmed 
-    if (buf->state != WAIT_ZC && buf->state != SENDING) {
-        return;
-    }
-
-    for (int j = 0; j < buf->send_nb; j++) {
-        uint32_t id = buf->send_ids[j];
-
-        if (id >= first_send_id && id <= last_send_id) {
-            buf->confirmed_nb++;
-        }
-    }
-
-    if (buf-> confirmed_nb == buf->send_nb && buf->state == WAIT_ZC && buf->send_nb > 0) {
-        buf->state = FREE;
-    }
-}
-
-static void release_buffer_from_range(struct zc_buffer *pool,
-                                      int pool_size,
-                                      uint32_t first_send_id,
-                                      uint32_t last_send_id)
-{
-    for (int i = 0; i < pool_size; i++) {
-            confirm_send_ids(&pool[i], first_send_id, last_send_id);
-    }
-}
-
-//read all the zerocopy notifications that are available in the error queue of the socket
-//return the number of notifications received
-static int read_zc_notif(int sock,
-                         struct zc_buffer *pool,
-                         int pool_size,
-                         int *fallback_count)
-{
-    int count = 0;
-
-    // for (;;) équivaut à while (1) ou while (true) en C, c'est une boucle infinie
-    for (;;) {
-        char data_idc = 0;
-        char control_buf[512] = {0}; // for control datas
-
-        struct iovec iov = {
-            .iov_base = &data_idc,
-            .iov_len = sizeof(data_idc),
-        };
-
-        struct msghdr msg = {
-            .msg_iov = &iov,
-            .msg_iovlen = 1,
-            .msg_control = control_buf,
-            .msg_controllen = sizeof(control_buf),
-        };
-
-        ssize_t ret = recvmsg(sock, &msg, MSG_ERRQUEUE | MSG_DONTWAIT);
-
-        if (ret < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
-
-            perror("recvmsg MSG_ERRQUEUE");
-            exit(EXIT_FAILURE);
-        }
-
-        // msg_control can contain multiple control messages,
-        // i need to iterate over them to find the one with the ZEROCOPY notification
-        for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-             cmsg != NULL;
-             cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-
-            // zerocopy notifications are received as IP extended errors
-            // IP extended errors are not a real error but a control message
-            if (cmsg->cmsg_level == SOL_IP && cmsg->cmsg_type == IP_RECVERR) {
-                struct sock_extended_err *serr =
-                    (struct sock_extended_err *)CMSG_DATA(cmsg);
-
-                if (serr->ee_origin == SO_EE_ORIGIN_ZEROCOPY) {
-                    uint32_t first_send_id = serr->ee_info;
-                    uint32_t last_send_id = serr->ee_data;
-
-                    count++;
-
-                    if (serr->ee_code == SO_EE_CODE_ZEROCOPY_COPIED ||
-                        serr->ee_code == 1) {
-                        (*fallback_count)++;
-                    }
-
-                    release_buffer_from_range(pool,
-                                              pool_size,
-                                              first_send_id,
-                                              last_send_id);
-                }
-            }
-        }
-    }
-
-    return count;
-}
-
 static int recv_available(int sock,
-                            struct zc_buffer *pool,
+                            struct buffer *pool,
                             int pool_size,
                             size_t *recv_index,
                             size_t *recv_offset,
@@ -233,7 +96,7 @@ static int recv_available(int sock,
                             size_t expected_received)
 {
     while (*total_received < expected_received) {
-        struct zc_buffer *buf = &pool[*recv_index];
+        struct buffer *buf = &pool[*recv_index];
         
         // the next buffer to receive data is not free, 
         // so we can't receive data in it
@@ -280,10 +143,7 @@ static int recv_available(int sock,
     return 1;
 }
 
-
-
-// mainly used to recv the config struct 
-static int recv_all(int sock, char *buffer, size_t size)
+static void recv_all(int sock, char *buffer, size_t size)
 {
     size_t total_received = 0;
 
@@ -295,32 +155,35 @@ static int recv_all(int sock, char *buffer, size_t size)
 
         if (received < 0) {
             perror("recv");
-            return -1;
+            exit(EXIT_FAILURE);
         }
 
         if (received == 0) {
             fprintf(stderr, "Connection closed before receiving all data\n");
-            return -1;
+            exit(EXIT_FAILURE);
         }
 
         total_received += (size_t)received;
     }
-    return 1;
 }
 
+
+/////////////////////////////////////////////
+
+
+
+
+
 static int send_available(int sock,
-                            struct zc_buffer *pool,
+                            struct buffer *pool,
                             int pool_size,
                             size_t *send_index,
                             size_t *send_offset,
                             size_t *total_sent,
-                            size_t expected_sent,
-                            uint32_t *next_zc_id,
-                            int *total_notif,
-                            int *fallback_count)
+                            size_t expected_sent)
 {
     while (*total_sent < expected_sent) {
-        struct zc_buffer *buf = &pool[*send_index];
+        struct buffer *buf = &pool[*send_index];
 
         // the next buffer to send data is not ready to send, 
         // so we can't send data from it
@@ -332,34 +195,25 @@ static int send_available(int sock,
         if(buf->state == READY_TO_SEND) {
             buf->state = SENDING;
             *send_offset = 0;
-            reset_buffer_tracking(buf);
         }
 
         size_t left_to_send = buf->size - *send_offset;
 
-        if(left_to_send > CHUNK_SIZE) {
-            left_to_send = CHUNK_SIZE;
-        }
         ssize_t sent = send(sock,
                             buf->data + *send_offset,
                             left_to_send,
-                            MSG_ZEROCOPY);
+                            0);
 
         if(sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return 1;
             }
 
-            if (errno == ENOBUFS) {
-                *total_notif += read_zc_notif(sock,
-                                              pool,
-                                              pool_size,
-                                              fallback_count);
-                usleep(10);
-                return 1;
+            if (errno == EINTR) {
+                continue;
             }
 
-            perror("send MSG_ZEROCOPY");
+            perror("send");
             return -1;
         }
 
@@ -368,30 +222,12 @@ static int send_available(int sock,
             return -1;
         }
 
-        if(buf->send_nb >= MAX_SEND_IDS_PER_BUFFER) {
-            fprintf(stderr,
-                    "Too many partial sends for one buffer. "
-                    "Increase MAX_SEND_IDS_PER_BUFFER.\n");
-            return -1;
-        }
-
-        buf->send_ids[buf->send_nb] = *next_zc_id;
-        buf->send_nb++;
-        
-        (*next_zc_id)++;
         *send_offset += (size_t)sent;
         *total_sent += (size_t)sent;
 
         if(*send_offset == buf->size){
-            // the zc notif may have been received already 
-            // so we free the buffer 
-            if(buf->confirmed_nb == buf->send_nb) {
-                buf->state = FREE;
-            } else {
-                buf->state = WAIT_ZC;
-            }
-        
-
+            // the buffer is fully sent so it can be freed
+            buf->state = FREE;
             *send_index = (*send_index + 1)%(size_t)pool_size;
             *send_offset = 0;
         }
@@ -399,6 +235,8 @@ static int send_available(int sock,
 
     return 1;
 }
+
+
 int main(void)
 {
     int server_fd;
@@ -441,8 +279,6 @@ int main(void)
 
     printf("Server is listening on port %d\n", PORT);
 
-    // accept incoming connection 
-    // this server is going to be open until the user closes it manually
     for (;;) {
         int new_socket;
         socklen_t addrlen = sizeof(address);
@@ -450,11 +286,7 @@ int main(void)
         size_t total_received = 0;
         size_t total_sent = 0;
 
-        int total_notif = 0;
-        int fallback_count = 0;
-
-        uint32_t next_zc_id = 0;
-
+        // accept incoming connection
         new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
         if (new_socket < 0) {
             perror("accept");
@@ -463,50 +295,36 @@ int main(void)
 
         printf("Connection accepted\n");
 
-        int one = 1;
-        if (setsockopt(new_socket, SOL_SOCKET, SO_ZEROCOPY, &one, sizeof(one)) < 0) {
-            perror("setsockopt SO_ZEROCOPY");
-            close(new_socket);
-            continue;
-        }
-
-        // read the struct config from the client to get the buffer size and number of sends
         struct config conf;
 
+        // read the struct config from the client to get the buffer size and number of sends
         recv_all(new_socket, (char *)&conf, sizeof(conf));
+        int pool_size = DEFAULT_POOL_SIZE;
 
-        if (conf.buffer_size == 0 ||
-            conf.nb_sends <= 0 ||
-            conf.pool_size <= 0) 
+        if (conf.buffer_size == 0 || conf.nb_sends <= 0) 
         {
             fprintf(stderr, "Invalid config received from client\n");
             close(new_socket);
             continue;
         }
 
-        // the expected total number of bytes to be received from the client 
         size_t expected_received =(size_t)conf.buffer_size *(size_t)conf.nb_sends;
 
         printf("Client config received\n");
         printf("buffer_size: %zu\n", conf.buffer_size);
         printf("nb_sends: %d\n", conf.nb_sends);
-        printf("pool_size: %d\n", conf.pool_size);
 
-        // allocate the pool of buffers for zerocopy with calloc to initialize the memory to zero
-        // malloc would work if we initialize the memory to zero manually after 
-        // but it could leads to more errors (like in the free(pool)) if the allocation doesn't work and we try to 
-        // initialize the memory to zero after, so calloc is safer
-        struct zc_buffer *pool = calloc((size_t)conf.pool_size, sizeof(*pool));
+        struct buffer *pool = calloc((size_t)pool_size, sizeof(*pool));
 
         if (pool == NULL) {
             perror("calloc pool");
             close(new_socket);
             continue;
         }
-        
+
         bool allocation_failed = false;
 
-        for (int i = 0; i < conf.pool_size; i++) {
+        for (int i = 0; i < pool_size; i++) {
             pool[i].data = malloc(conf.buffer_size);
 
             if (pool[i].data == NULL) {
@@ -517,18 +335,16 @@ int main(void)
 
             pool[i].size = conf.buffer_size;
             pool[i].state = FREE;
-            pool[i].send_nb = 0;
-            pool[i].confirmed_nb = 0;
         }
 
         if (allocation_failed) {
-            free_pool(pool, conf.pool_size);
+            free_pool(pool, pool_size);
             close(new_socket);
             continue;
         }
 
         if(set_nonblocking(new_socket)<0){
-            free_pool(pool,conf.pool_size);
+            free_pool(pool,pool_size);
             close(new_socket);
             continue;
         }
@@ -546,19 +362,17 @@ int main(void)
         size_t recv_offset = 0;
         size_t send_offset =0 ;
 
-        while (total_received < expected_received || count_busy_buffers(pool, conf.pool_size) > 0 
+
+
+
+        while (total_received < expected_received || count_busy_buffers(pool, pool_size) > 0 
                 || total_sent < expected_received) 
             {
             struct pollfd pfd;
 
-            total_notif += read_zc_notif(new_socket,
-                                        pool,
-                                        conf.pool_size,
-                                        &fallback_count);
-
 
             pfd.fd = new_socket;
-            pfd.events = POLLERR;
+            pfd.events = 0;
             pfd.revents = 0;
             
             // if all the data has not been received yet and if a buffer is free or is receiving 
@@ -582,19 +396,11 @@ int main(void)
                 exit(EXIT_FAILURE);
             }
 
-            if (pfd.revents & POLLERR) {
-                //printf("In POLLERR\n");
-                total_notif += read_zc_notif(new_socket,
-                                            pool,
-                                            conf.pool_size,
-                                            &fallback_count);
-            }
-
             if (pfd.revents & POLLIN) {
                 //printf("In POLLIN\n");
                 if (recv_available(new_socket,
                                     pool,
-                                    conf.pool_size,
+                                    pool_size,
                                     &recv_index,
                                     &recv_offset,
                                     &total_received,
@@ -607,47 +413,45 @@ int main(void)
                 //printf("In POLLOUT\n");
                 if (send_available(new_socket,
                                     pool,
-                                    conf.pool_size,
+                                    pool_size,
                                     &send_index,
                                     &send_offset,
                                     &total_sent,
-                                    expected_received,
-                                    &next_zc_id,
-                                    &total_notif,
-                                    &fallback_count) < 0) {
+                                    expected_received) < 0) {
                     return -1;
                 }
             }
 
-            if ((pfd.revents & POLLHUP) &&
-                total_received < expected_received) {
-                    //printf("In POLLHUP\n");
-                    fprintf(stderr, "Connection closed before all expected data was received\n");
-                    return -1;
+            if ((pfd.revents & POLLHUP) && total_received < expected_received) {
+                //printf("In POLLHUP\n");
+                fprintf(stderr, "Connection closed before all expected data was received\n");
+                return -1;
+            }
+
+            if (pfd.revents & POLLERR) {
+                fprintf(stderr, "Socket error reported by poll\n");
+                return -1;
+            }
+
+            if (pfd.revents & POLLNVAL) {
+                fprintf(stderr, "Invalid socket reported by poll\n");
+                return -1;
             }
         }
 
         printf("buffer_size: %zu\n", conf.buffer_size);
         printf("nb_sends: %d\n", conf.nb_sends);
-        printf("pool_size: %d\n", conf.pool_size);
-        printf("MAX_SEND_IDS_PER_BUFFER: %d\n", MAX_SEND_IDS_PER_BUFFER);
+        printf("pool_size: %d\n", pool_size);
         printf("Server received: %zu bytes\n", total_received);
-        printf("Server sent: %zu bytes with MSG_ZEROCOPY\n", total_sent);
-        printf("Server zerocopy notifications received: %d\n", total_notif);
-        printf("Server fallback copy notifications: %d\n", fallback_count);
+        printf("Server sent: %zu bytes\n", total_sent);
 
-        printf("RESULT,server_zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%d,%d\n",
+        printf("RESULT,server_copy_loop_pipeline,%zu,%d,%zu,%zu\n",
                conf.buffer_size,
                conf.nb_sends,
-               conf.pool_size,
                total_received,
-               total_sent,
-               total_notif,
-               fallback_count);
+               total_sent);
 
-        free_pool(pool, conf.pool_size);
-
-        // close the socket but not the server socket, so that the server can accept new connections from other clients
+        free_pool(pool, pool_size);
         close(new_socket);
 
         printf("Connection closed, waiting for another client...\n");

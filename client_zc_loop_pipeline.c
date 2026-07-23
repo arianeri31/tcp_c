@@ -743,7 +743,7 @@ int main(int argc, char **argv)
            total_notif,
            fallback_count);
 
-    printf("RESULT_COMP_ZC,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
+    printf("RESULT_COMP,zc_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
            conf.buffer_size,
            conf.nb_sends,
            conf.pool_size,
