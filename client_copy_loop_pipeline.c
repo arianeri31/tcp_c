@@ -436,6 +436,18 @@ int main(int argc, char **argv)
            total_msg_time_us,
            average_msg_time_us);
 
+    printf("RESULT_ALL,copy_loop_pipeline,%zu,%d,%d,%zu,%zu,%lld,%lld,%lld,%d,%d\n",
+           conf.buffer_size,
+           conf.nb_sends,
+           0,
+           total_sent,
+           total_received,
+           total_elapsed_time_us,
+           total_msg_time_us,
+           average_msg_time_us,
+           0,
+           0);
+
     close(sock);
     free(send_buffer);
     free(recv_buffer);
